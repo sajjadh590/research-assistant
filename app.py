@@ -16,7 +16,7 @@ api_key = st.sidebar.text_input("کلید API گوگل (Gemini)", type="password
 if api_key:
     # اگر کلید بود، هوش مصنوعی را فعال کن
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
 else:
     # اگر کلید نبود، به کاربر پیام بده و برنامه را متوقف کن
     st.info("لطفاً برای فعال شدن برنامه، کلید API خود را در نوار کناری وارد کنید.")
