@@ -1,75 +1,48 @@
-import os
-import aiohttp
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
+import streamlit as st
+import pandas as pd
+import requests
+import google.generativeai as genai
+import time
+import json
 
+# --- بخش جدید: تنظیمات صفحه و دریافت کلید ---
+# این خط سایدبار را به صورت پیش‌فرض باز نگه می‌دارد
+st.set_page_config(initial_sidebar_state="expanded")
 
-# بارگذاری متغیرهای محیطی (برای توسعه محلی)
-load_dotenv()
+# ایجاد یک کادر در سایدبار برای دریافت کلید
+api_key = st.sidebar.text_input("کلید API گوگل (Gemini)", type="password")
 
+# بررسی می‌کنیم که آیا کلید وارد شده است یا نه
+if api_key:
+    # اگر کلید بود، هوش مصنوعی را فعال کن
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    # اگر کلید نبود، به کاربر پیام بده و برنامه را متوقف کن
+    st.info("لطفاً برای فعال شدن برنامه، کلید API خود را در نوار کناری وارد کنید.")
+    st.stop()
 
-# مقداردهی اولیه اپلیکیشن FastAPI
-app = FastAPI()
+# --- بقیه کد شما از اینجا شروع می‌شود ---
 
+st.title("🔬 دستیار پژوهشی هوشمند")
+topic = st.text_input("موضوع تحقیق خود را وارد کنید:")
 
-# خواندن کلید API از متغیرهای محیطی
-# در Hugging Face، این مقدار از بخش 'Repository secrets' خوانده می‌شود.
-API_KEY = os.getenv("OPENAI_API_KEY")
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-
-# مانت کردن پوشه 'static' برای ارائه فایل‌های HTML, CSS, JS
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-
-@app.get("/")
-async def read_index():
-    """
-    ارائه فایل اصلی index.html به کاربر.
-    """
-    return FileResponse('static/index.html')
-
-
-@app.post("/api/chat/completions")
-async def proxy_api_call(request: Request):
-    """
-    این endpoint به عنوان یک پراکسی امن عمل می‌کند.
-    درخواست JSON را از فرانت‌اند دریافت کرده، کلید API را به آن اضافه می‌کند
-    و سپس به سرور OpenRouter ارسال می‌نماید.
-    """
-    if not API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="API key not configured on the server. The admin needs to set the OPENAI_API_KEY secret."
-        )
-
-
+if topic:
+    # (بقیه منطق برنامه شما که جستجو را انجام می‌دهد و...)
+    # این بخش برای نمونه ساده شده است
+    st.write(f"در حال جستجو برای: {topic}")
+    
     try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+        # اینجا باید کد جستجوی پاب‌مد شما بیاید
+        # برای سادگی، فعلا یک پیام نمایش می‌دهیم
+        st.success("جستجو با موفقیت انجام شد (این یک پیام تست است).")
 
+        # اینجا می‌توانید دکمه‌های تحلیل را اضافه کنید
+        if st.button("یافتن گپ‌های تحقیقاتی"):
+            with st.spinner("در حال تحلیل..."):
+                prompt = f"Find research gaps for the topic: {topic}"
+                response = model.generate_content(prompt)
+                st.markdown(response.text)
 
-    headers = {
-        'Authorization': f'Bearer {API_KEY}',
-        'Content-Type': 'application/json',
-    }
-
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(API_URL, json=body, headers=headers) as response:
-                response_json = await response.json()
-                if not response.ok:
-                    # ارسال خطای دریافتی از API اصلی به فرانت‌اند
-                    raise HTTPException(status_code=response.status, detail=response_json)
-                return response_json
-        except aiohttp.ClientConnectorError as e:
-            raise HTTPException(status_code=502, detail=f"Network error: Unable to connect to the external API. {e}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
-
-
-# برای اجرای محلی: uvicorn app:app --reload --port 7860
+    except Exception as e:
+        st.error(f"خطایی رخ داد: {e}")
