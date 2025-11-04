@@ -8,3 +8,6 @@ __pycache__/
 
 # Mac files
 .DS_Store
+
+# Streamlit
+streamlit.log
