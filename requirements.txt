@@ -1,7 +1,6 @@
-fastapi
-uvicorn[standard]
-python-dotenv
-aiohttp
-openai
-beautifulsoup4
+streamlit>=1.23.0
+requests>=2.28.0
+ratelimit>=2.2.1
+pandas
 google-generativeai
+logging
