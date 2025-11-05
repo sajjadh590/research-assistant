@@ -4,17 +4,17 @@ import logging
 from datetime import timedelta
 from ratelimit import limits, sleep_and_retry
 import time
+from xml.etree import ElementTree # برای خواندن چکیده‌ها
 
 # --- تنظیمات محدودیت API پاب‌مد ---
-# (۳ تماس در ثانیه، طبق پرامپت)
 @sleep_and_retry
 @limits(calls=3, period=1)
 def safe_request_get(url, params):
     """یک تابع امن برای ارسال درخواست GET با مدیریت خطا و محدودیت سرعت."""
     try:
-        response = requests.get(url, params=params, timeout=10) # ۱۰ ثانیه انتظار
-        response.raise_for_status() # بررسی خطاهای HTTP
-        return response.json()
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        return response
     except requests.exceptions.Timeout:
         logging.error(f"Timeout while requesting {url}")
         st.warning("PubMed request timed out.")
@@ -36,30 +36,31 @@ def fetch_abstracts(pmid_list):
     fetch_params = {
         "db": "pubmed",
         "id": ids_str,
-        "retmode": "xml", # XML تنها راه مطمئن برای دریافت چکیده است
+        "retmode": "xml",
         "rettype": "abstract"
     }
     
-    # اینجا از request خام استفاده می‌کنیم چون XML است
     try:
-        response = requests.get(fetch_url, params=fetch_params, timeout=15)
-        response.raise_for_status()
-        
-        # این یک پارس کردن ساده XML است
-        from xml.etree import ElementTree
+        response = safe_request_get(fetch_url, fetch_params)
+        if response is None:
+            return {}
+            
         root = ElementTree.fromstring(response.content)
         abstracts = {}
         for article in root.findall('.//PubmedArticle'):
-            pmid = article.find('.//PMID').text
+            pmid_node = article.find('.//PMID')
+            if pmid_node is None: continue
+            pmid = pmid_node.text
+            
             abstract_element = article.find('.//AbstractText')
-            if abstract_element is not None:
+            if abstract_element is not None and abstract_element.text:
                 abstracts[pmid] = abstract_element.text
             else:
                 abstracts[pmid] = None # چکیده وجود ندارد
         return abstracts
         
     except Exception as e:
-        logging.error(f"Error fetching abstracts: {e}")
+        logging.error(f"Error fetching/parsing abstracts: {e}")
         return {}
 
 
@@ -73,8 +74,11 @@ def search_pubmed(query, max_results=10):
     search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     search_params = {"db": "pubmed", "term": query, "retmax": max_results, "retmode": "json"}
     
-    search_data = safe_request_get(search_url, search_params)
-    if not search_data or "esearchresult" not in search_data:
+    search_response = safe_request_get(search_url, search_params)
+    if search_response is None: return []
+    search_data = search_response.json()
+    
+    if "esearchresult" not in search_data:
         return []
     
     id_list = search_data["esearchresult"]["idlist"]
@@ -86,12 +90,14 @@ def search_pubmed(query, max_results=10):
     summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     summary_params = {"db": "pubmed", "id": ",".join(id_list), "retmode": "json"}
     
-    summary_data = safe_request_get(summary_url, summary_params)
-    if not summary_data or "result" not in summary_data:
+    summary_response = safe_request_get(summary_url, summary_params)
+    if summary_response is None: return []
+    summary_data = summary_response.json()
+
+    if "result" not in summary_data:
         return []
 
     # --- مرحله ۳: دریافت چکیده‌ها (Abstracts) با efetch ---
-    # (به دلیل محدودیت‌های API، این را جداگانه صدا می‌زنیم)
     time.sleep(1) # تاخیر قبل از درخواست بعدی
     abstracts = fetch_abstracts(id_list)
 
@@ -114,12 +120,10 @@ def search_pubmed(query, max_results=10):
     
     return articles
 
-
-# ---!!! تابع گمشده (این همان چیزی است که app.py نیاز دارد) !!!---
+# --- تابع کش (Caching) ---
 @st.cache_data(ttl=timedelta(hours=24)) # کش کردن نتایج برای ۲۴ ساعت
 def search_pubmed_cached(query, max_results=10):
     """
     این تابع، فراخوانی اصلی جستجوی پاب‌مد را کش می‌کند.
-    app.py به دنبال این تابع می‌گشت.
     """
     return search_pubmed(query, max_results)
