@@ -1,70 +1,66 @@
 import streamlit as st
 import logging
-from modules.gemini_api import analyze_with_gemini_cached # این تابع حالا فقط 1 ورودی می‌گیرد
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from modules.gemini_api import analyze_with_gemini_cached
+import time
 
 def create_prompt_for_article(article):
     """یک پرامپت دقیق برای تحلیل یک مقاله ایجاد می‌کند."""
     title = article.get('title', 'No Title')
     abstract = article.get('abstract', 'No Abstract')
     
+    # پرامپت بهینه‌سازی شده از پرامپت فاز ۲
     return f"""
-    Analyze the following abstract to find research gaps.
+    You are an expert medical researcher. Analyze the following abstract:
     Title: {title}
     Abstract: {abstract}
     
     Instruction: Based ONLY on this abstract, identify a potential research gap.
-    Return a single, concise gap.
+    Return a single, concise gap. If no abstract is provided, state that.
     """
-
-def analyze_article(article):
-    """یک مقاله را دریافت و تحلیل می‌کند."""
-    if not article.get('abstract'):
-        logging.warning(f"Skipping article {article.get('pmid', 'N/A')}: Missing abstract")
-        raise ValueError("Missing abstract") # این باعث می‌شود در UI پیام "skipped" نشان داده شود
-
-    # ۱. ایجاد پرامپت
-    prompt = create_prompt_for_article(article)
-    
-    # ۲. فراخوانی تابع کش (فقط با 'prompt')
-    # !!! این خط اصلاح شده است !!!
-    analysis = analyze_with_gemini_cached(prompt)
-    
-    return {
-        "pmid": article.get('pmid'),
-        "title": article.get('title'),
-        "analysis": analysis
-    }
 
 def analyze_articles_with_progress(articles, query):
     """
-    مقالات را با استفاده از پردازش موازی و نوار پیشرفت تحلیل می‌کند.
+    مقالات را به صورت ترتیبی (یکی یکی) برای جلوگیری از Rate Limit تحلیل می‌کند.
     """
     results = []
     skipped_count = 0
     total = len(articles)
     
-    progress_bar = st.progress(0, text="Starting analysis...")
+    progress_bar = st.progress(0, text="Starting analysis (sequentially)...")
     
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_article = {executor.submit(analyze_article, article): article for article in articles}
-        
-        for i, future in enumerate(as_completed(future_to_article)):
-            try:
-                result = future.result()
-                results.append(result)
-                st.success(f"✅ Analysis successful for: {result['title'][:50]}...")
-                st.markdown(f"> {result['analysis']}") # نمایش تحلیل
-                
-            except ValueError as e: # خطایی که برای چکیده خالی تعریف کردیم
-                skipped_count += 1
-                st.warning(f"⚠️ Skipped article: {str(e)}")
-            except Exception as e:
-                skipped_count += 1
-                st.error(f"❌ AI analysis failed: {str(e)}")
+    for i, article in enumerate(articles):
+        # بررسی وجود چکیده قبل از ارسال
+        if not article.get('abstract'):
+            st.warning(f"⚠️ Skipped article (Missing abstract): {article.get('title', 'N/A')[:50]}...")
+            skipped_count += 1
+            continue # رفتن به مقاله بعدی
+
+        try:
+            # ۱. ایجاد پرامپت
+            prompt = create_prompt_for_article(article)
             
-            # آپدیت نوار پیشرفت
-            progress_bar.progress((i + 1) / total, text=f"Analyzed {i+1}/{total} articles")
+            # ۲. فراخوانی تابع کش (فقط با 'prompt')
+            analysis_text = analyze_with_gemini_cached(prompt)
+            
+            # ۳. بررسی اینکه آیا خود جمنای خطا داده است یا نه
+            if analysis_text.startswith("خطا"):
+                st.error(f"❌ AI analysis failed for: {article.get('title', 'N/A')[:50]}...")
+            else:
+                st.success(f"✅ Analysis successful for: {article.get('title', 'N/A')[:50]}...")
+                st.markdown(f"> {analysis_text}") # نمایش تحلیل
+                results.append({
+                    "pmid": article.get('pmid'),
+                    "title": article.get('title'),
+                    "analysis": analysis_text
+                })
+
+        except Exception as e:
+            skipped_count += 1
+            st.error(f"❌ Critical error analyzing article: {str(e)}")
+        
+        # آپدیت نوار پیشرفت
+        progress_bar.progress((i + 1) / total, text=f"Analyzed {i+1}/{total} articles")
+        time.sleep(1) # ۱ ثانیه تاخیر برای احترام به محدودیت API
 
     progress_bar.empty()
     st.info(f"Analysis complete. {len(results)} articles analyzed, {skipped_count} skipped.")
