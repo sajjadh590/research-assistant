@@ -1,56 +1,125 @@
-import logging
 import streamlit as st
 import requests
-from ratelimit import limits, sleep_and_retry
+import logging
 from datetime import timedelta
+from ratelimit import limits, sleep_and_retry
+import time
 
-PUBMED_RATE_CALLS = 3
-PUBMED_RATE_PERIOD = 1  # seconds
-
-PUBMED_API_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-PUBMED_FETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-
+# --- تنظیمات محدودیت API پاب‌مد ---
+# (۳ تماس در ثانیه، طبق پرامپت)
 @sleep_and_retry
-@limits(calls=PUBMED_RATE_CALLS, period=PUBMED_RATE_PERIOD)
-def fetch_from_pubmed(query, max_results):
+@limits(calls=3, period=1)
+def safe_request_get(url, params):
+    """یک تابع امن برای ارسال درخواست GET با مدیریت خطا و محدودیت سرعت."""
     try:
-        params = {
-            "db": "pubmed",
-            "term": query,
-            "retmax": max_results,
-            "retmode": "json",
-        }
-        r = requests.get(PUBMED_API_URL, params=params, timeout=10)
-        r.raise_for_status()
-        idlist = r.json()["esearchresult"]["idlist"]
-        if not idlist:
-            return []
-        # Fetch summaries for selected PMIDs
-        fetch_params = {
-            "db": "pubmed",
-            "id": ",".join(idlist),
-            "retmode": "xml",
-        }
-        rf = requests.get(PUBMED_FETCH_URL, params=fetch_params, timeout=15)
-        rf.raise_for_status()
-        # Minimal mock parse here: Extend with xml parsing for actual abstracts
-        articles = [{"pmid": pid, "title": f"PMID: {pid}", "abstract": ""} for pid in idlist]
-        return articles
+        response = requests.get(url, params=params, timeout=10) # ۱۰ ثانیه انتظار
+        response.raise_for_status() # بررسی خطاهای HTTP
+        return response.json()
+    except requests.exceptions.Timeout:
+        logging.error(f"Timeout while requesting {url}")
+        st.warning("PubMed request timed out.")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request error for {url}: {e}")
+        st.warning(f"Network error: {e}")
+        return None
 
-    except requests.Timeout:
-        st.error("⏱️ PubMed request timed out. Please try again.")
-        logging.error(f"PubMed timeout for query: {query}")
-        return []
-    except requests.RequestException as e:
-        st.error(f"❌ Network error: {str(e)}")
-        logging.error(f"PubMed request error: {e}", exc_info=True)
-        return []
+def fetch_abstracts(pmid_list):
+    """
+    دریافت چکیده مقالات با استفاده از efetch.
+    """
+    if not pmid_list:
+        return {}
+
+    ids_str = ",".join(pmid_list)
+    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    fetch_params = {
+        "db": "pubmed",
+        "id": ids_str,
+        "retmode": "xml", # XML تنها راه مطمئن برای دریافت چکیده است
+        "rettype": "abstract"
+    }
+    
+    # اینجا از request خام استفاده می‌کنیم چون XML است
+    try:
+        response = requests.get(fetch_url, params=fetch_params, timeout=15)
+        response.raise_for_status()
+        
+        # این یک پارس کردن ساده XML است
+        from xml.etree import ElementTree
+        root = ElementTree.fromstring(response.content)
+        abstracts = {}
+        for article in root.findall('.//PubmedArticle'):
+            pmid = article.find('.//PMID').text
+            abstract_element = article.find('.//AbstractText')
+            if abstract_element is not None:
+                abstracts[pmid] = abstract_element.text
+            else:
+                abstracts[pmid] = None # چکیده وجود ندارد
+        return abstracts
+        
     except Exception as e:
-        st.error(f"❌ Unexpected error: {str(e)}")
-        logging.error(f"Unexpected error in PubMed fetch: {e}", exc_info=True)
+        logging.error(f"Error fetching abstracts: {e}")
+        return {}
+
+
+def search_pubmed(query, max_results=10):
+    """
+    جستجوی پاب‌مد، دریافت خلاصه‌ها و چکیده‌ها.
+    """
+    logging.info(f"Searching PubMed for: {query}")
+    
+    # --- مرحله ۱: جستجو و دریافت شناسه‌ها (PMIDs) ---
+    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    search_params = {"db": "pubmed", "term": query, "retmax": max_results, "retmode": "json"}
+    
+    search_data = safe_request_get(search_url, search_params)
+    if not search_data or "esearchresult" not in search_data:
+        return []
+    
+    id_list = search_data["esearchresult"]["idlist"]
+    if not id_list:
+        st.info("No articles found for this query.")
         return []
 
-@st.cache_data(ttl=timedelta(hours=24))
+    # --- مرحله ۲: دریافت اطلاعات اولیه (Title, Authors) با esummary ---
+    summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    summary_params = {"db": "pubmed", "id": ",".join(id_list), "retmode": "json"}
+    
+    summary_data = safe_request_get(summary_url, summary_params)
+    if not summary_data or "result" not in summary_data:
+        return []
+
+    # --- مرحله ۳: دریافت چکیده‌ها (Abstracts) با efetch ---
+    # (به دلیل محدودیت‌های API، این را جداگانه صدا می‌زنیم)
+    time.sleep(1) # تاخیر قبل از درخواست بعدی
+    abstracts = fetch_abstracts(id_list)
+
+    # --- مرحله ۴: ترکیب نتایج ---
+    articles = []
+    summary_result = summary_data["result"]
+    
+    for pmid in id_list:
+        if pmid not in summary_result: continue
+        
+        article_data = summary_result[pmid]
+        articles.append({
+            "pmid": pmid,
+            "title": article_data.get("title", "No Title"),
+            "authors": ", ".join([author["name"] for author in article_data.get("authors", [])]),
+            "year": article_data.get("pubdate", "N/A").split(" ")[0],
+            "journal": article_data.get("source", "N/A"),
+            "abstract": abstracts.get(pmid, None) # اضافه کردن چکیده از نتایج efetch
+        })
+    
+    return articles
+
+
+# ---!!! تابع گمشده (این همان چیزی است که app.py نیاز دارد) !!!---
+@st.cache_data(ttl=timedelta(hours=24)) # کش کردن نتایج برای ۲۴ ساعت
 def search_pubmed_cached(query, max_results=10):
-    """Cache PubMed search results"""
-    return fetch_from_pubmed(query, max_results)
+    """
+    این تابع، فراخوانی اصلی جستجوی پاب‌مد را کش می‌کند.
+    app.py به دنبال این تابع می‌گشت.
+    """
+    return search_pubmed(query, max_results)
