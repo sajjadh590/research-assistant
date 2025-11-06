@@ -5,14 +5,29 @@ from datetime import timedelta
 from ratelimit import limits, sleep_and_retry
 import time
 from xml.etree import ElementTree # برای خواندن چکیده‌ها
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # --- تنظیمات محدودیت API پاب‌مد ---
 @sleep_and_retry
 @limits(calls=3, period=1)
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=4), retry=retry_if_exception_type(requests.exceptions.RequestException))
+def _request_with_retry(url, params, headers):
+    return requests.get(url, params=params, headers=headers, timeout=15)
+
 def safe_request_get(url, params):
     """یک تابع امن برای ارسال درخواست GET با مدیریت خطا و محدودیت سرعت."""
     try:
-        response = requests.get(url, params=params, timeout=10)
+        # افزودن شناسه ابزار و ایمیل در صورت وجود در secrets
+        tool = st.secrets.get("NCBI_TOOL", None)
+        email = st.secrets.get("NCBI_EMAIL", None)
+        if tool:
+            params = {**params, "tool": tool}
+        if email:
+            params = {**params, "email": email}
+
+        headers = {"User-Agent": f"research-assistant/1.0 ({email})" if email else "research-assistant/1.0"}
+
+        response = _request_with_retry(url, params, headers)
         response.raise_for_status()
         return response
     except requests.exceptions.Timeout:
@@ -52,11 +67,10 @@ def fetch_abstracts(pmid_list):
             if pmid_node is None: continue
             pmid = pmid_node.text
             
-            abstract_element = article.find('.//AbstractText')
-            if abstract_element is not None and abstract_element.text:
-                abstracts[pmid] = abstract_element.text
-            else:
-                abstracts[pmid] = None # چکیده وجود ندارد
+            # برخی مقالات چندین بخش AbstractText دارند؛ همه را ادغام کنیم
+            abstract_nodes = article.findall('.//AbstractText')
+            abstract_texts = [node.text for node in abstract_nodes if node is not None and node.text]
+            abstracts[pmid] = "\n".join(abstract_texts) if abstract_texts else None
         return abstracts
         
     except Exception as e:
@@ -109,10 +123,20 @@ def search_pubmed(query, max_results=10):
         if pmid not in summary_result: continue
         
         article_data = summary_result[pmid]
+        # دسترسی امن‌تر به فهرست نویسندگان
+        authors_list = article_data.get("authors", []) or []
+        author_names = []
+        for author in authors_list:
+            name = None
+            if isinstance(author, dict):
+                name = author.get("name") or author.get("authtype")
+            if name:
+                author_names.append(name)
+
         articles.append({
             "pmid": pmid,
             "title": article_data.get("title", "No Title"),
-            "authors": ", ".join([author["name"] for author in article_data.get("authors", [])]),
+            "authors": ", ".join(author_names),
             "year": article_data.get("pubdate", "N/A").split(" ")[0],
             "journal": article_data.get("source", "N/A"),
             "abstract": abstracts.get(pmid, None) # اضافه کردن چکیده از نتایج efetch

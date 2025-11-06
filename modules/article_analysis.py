@@ -18,7 +18,7 @@ def create_prompt_for_article(article):
     Return a single, concise gap. If no abstract is provided, state that.
     """
 
-def analyze_articles_with_progress(articles, query):
+def analyze_articles_with_progress(articles, query, delay_seconds: float = 0.5, model_name: str = 'gemini-1.5-pro'):
     """
     مقالات را به صورت ترتیبی (یکی یکی) برای جلوگیری از Rate Limit تحلیل می‌کند.
     """
@@ -40,7 +40,7 @@ def analyze_articles_with_progress(articles, query):
             prompt = create_prompt_for_article(article)
             
             # ۲. فراخوانی تابع کش (فقط با 'prompt')
-            analysis_text = analyze_with_gemini_cached(prompt)
+            analysis_text = analyze_with_gemini_cached(prompt, model_name=model_name)
             
             # ۳. بررسی اینکه آیا خود جمنای خطا داده است یا نه
             if analysis_text.startswith("خطا"):
@@ -60,7 +60,7 @@ def analyze_articles_with_progress(articles, query):
         
         # آپدیت نوار پیشرفت
         progress_bar.progress((i + 1) / total, text=f"Analyzed {i+1}/{total} articles")
-        time.sleep(1) # ۱ ثانیه تاخیر برای احترام به محدودیت API
+        time.sleep(delay_seconds) # تاخیر قابل تنظیم برای احترام به محدودیت API
 
     progress_bar.empty()
     st.info(f"Analysis complete. {len(results)} articles analyzed, {skipped_count} skipped.")
